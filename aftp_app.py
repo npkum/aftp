@@ -28,7 +28,8 @@ def load_llm_streaming():
 llm_pipe = load_llm_streaming()
 
 # === Embedding + Vector Store ===
-encoder = SentenceTransformer("all-MiniLM-L6-v2")
+# === Embedding + Vector Store ===
+encoder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
 index = faiss.IndexFlatL2(384)
 vector_store: Dict[str, Dict[str, Any]] = {}
 
