@@ -1,0 +1,8 @@
+streamlit
+faiss-cpu
+langgraph
+langchain
+openai
+sentence-transformers
+transformers
+huggingface_hub
