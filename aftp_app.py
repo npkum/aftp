@@ -194,12 +194,15 @@ if submitted:
         "flagged_abuse": flagged_abuse
     }
     state = ApplicationState(application=application)
-    final_state = compiled_graph.invoke(state)
+
+    final_state_dict = compiled_graph.invoke(state)
+    final_state = ApplicationState(**final_state_dict)
 
     if final_state.selected_plan and not final_state.escalated:
         st.subheader("💡 Proposed Plan")
         st.markdown(f"**Plan:** {final_state.selected_plan}")
         st.markdown(f"**Description:** {hardship_plans[final_state.selected_plan]['description']}")
+
 
         feedback = st.text_input("Feedback? (Optional - type something like 'suggest alternative')")
         if feedback:
