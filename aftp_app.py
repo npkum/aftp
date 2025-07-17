@@ -9,7 +9,7 @@ import faiss
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from typing import Dict, Any, Optional
 
-# === Setup ===
+# === Page config ===
 st.set_page_config(page_title="AFTP - Hardship Planner", layout="centered")
 
 # === Load LLM ===
@@ -27,7 +27,7 @@ def load_llm_streaming():
 
 llm_pipe = load_llm_streaming()
 
-# === Vector store and embedding setup ===
+# === Embedding + Vector Store ===
 encoder = SentenceTransformer("all-MiniLM-L6-v2")
 index = faiss.IndexFlatL2(384)
 vector_store: Dict[str, Dict[str, Any]] = {}
@@ -47,7 +47,7 @@ hardship_plans = {
     "payment extension": {"description": "Extend term by 12 months.", "risk_score": 4},
 }
 
-# === Utility functions ===
+# === Utility Functions ===
 def check_eligibility(app):
     if app["income"] < app["expenses"]:
         return ["3-month deferral", "partial payment suspension"]
@@ -80,7 +80,7 @@ def assign_to_human_caseworker(app):
 def check_proactive_escalation(app):
     return app["history"]["late_payments"] > 3 or app.get("flagged_abuse", False)
 
-# === Sample data population ===
+# === Prepopulate Samples ===
 @st.cache_resource
 def prepopulate_samples():
     samples = [
@@ -95,7 +95,7 @@ def prepopulate_samples():
 
 prepopulate_samples()
 
-# === LangGraph setup ===
+# === LangGraph State Definition ===
 @dataclass
 class ApplicationState:
     application: Dict[str, Any]
@@ -109,6 +109,7 @@ def validate(state: ApplicationState) -> ApplicationState:
 def reason_and_rank(state: ApplicationState) -> ApplicationState:
     app = state.application
     eligible = check_eligibility(app)
+
     if not eligible:
         assign_to_human_caseworker(app)
         return ApplicationState(application=app, escalated=True, handled=True)
@@ -178,6 +179,7 @@ Options: validate, reason_and_rank, take_action, END
         return END
     return "reason_and_rank"
 
+# === LangGraph Compilation ===
 workflow = StateGraph(state_schema=ApplicationState)
 workflow.add_node("validate", validate)
 workflow.add_node("reason_and_rank", reason_and_rank)
@@ -188,55 +190,79 @@ workflow.add_conditional_edges("reason_and_rank", decide_next_node)
 workflow.add_conditional_edges("take_action", decide_next_node)
 compiled_graph = workflow.compile()
 
-# === UI ===
+# === Streamlit UI ===
 st.title("🤖 AFTP Hardship Planner")
-st.markdown("Submit your hardship information and get a suitable plan recommendation.")
+st.markdown("Submit your hardship information to receive a suitable plan recommendation.")
 
-with st.form("hardship_form"):
-    name = st.text_input("Full Name")
-    customer_id = st.text_input("Customer ID")
-    hardship_reason = st.selectbox("Hardship Reason", ["Job Loss", "Medical Emergency", "Disaster"])
-    income = st.number_input("Monthly Income", min_value=0.0)
-    expenses = st.number_input("Monthly Expenses", min_value=0.0)
-    account_type = st.selectbox("Account Type", ["mortgage", "credit card", "personal loan"])
-    late_payments = st.slider("Late Payments in Last 12 Months", 0, 12, 0)
-    flagged_abuse = st.checkbox("Previously defaulted or rejected?")
+# === Application Input Form ===
+if "final_state" not in st.session_state:
+    with st.form("input_form"):
+        name = st.text_input("Full Name")
+        customer_id = st.text_input("Customer ID")
+        hardship_reason = st.selectbox("Hardship Reason", ["Job Loss", "Medical Emergency", "Disaster"])
+        income = st.number_input("Monthly Income", min_value=0.0)
+        expenses = st.number_input("Monthly Expenses", min_value=0.0)
+        account_type = st.selectbox("Account Type", ["mortgage", "credit card", "personal loan"])
+        late_payments = st.slider("Late Payments in Last 12 Months", 0, 12, 0)
+        flagged_abuse = st.checkbox("Previously defaulted or rejected?")
 
-    submitted = st.form_submit_button("Submit Application")
+        submitted = st.form_submit_button("Submit Application")
 
-if submitted:
-    application = {
-        "customer_id": customer_id,
-        "name": name,
-        "submitted_on": str(datetime.today().date()),
-        "hardship_reason": hardship_reason,
-        "income": income,
-        "expenses": expenses,
-        "account_type": account_type,
-        "history": {"on_time_payments": 12 - late_payments, "late_payments": late_payments},
-        "flagged_abuse": flagged_abuse
-    }
+    if submitted:
+        application = {
+            "customer_id": customer_id,
+            "name": name,
+            "submitted_on": str(datetime.today().date()),
+            "hardship_reason": hardship_reason,
+            "income": income,
+            "expenses": expenses,
+            "account_type": account_type,
+            "history": {"on_time_payments": 12 - late_payments, "late_payments": late_payments},
+            "flagged_abuse": flagged_abuse
+        }
 
-    initial_state = ApplicationState(application=application)
-    final_state_dict = compiled_graph.invoke(initial_state)
-    final_state = ApplicationState(**final_state_dict)
+        initial_state = ApplicationState(application=application)
+        final_state_dict = compiled_graph.invoke(initial_state)
+        st.session_state.final_state = ApplicationState(**final_state_dict)
 
-    st.write("📊 Debug Output:", final_state)
+# === Plan Recommendation and Feedback ===
+if "final_state" in st.session_state:
+    final_state = st.session_state.final_state
 
     if final_state.selected_plan and not final_state.escalated:
         st.subheader("✅ Recommended Plan")
         st.write(f"**Plan:** {final_state.selected_plan}")
         st.write(f"**Description:** {hardship_plans[final_state.selected_plan]['description']}")
-        
-        feedback = st.text_input("Optional Feedback (e.g., 'suggest alternative')")
 
-        if feedback:
-            if "alternative" in feedback:
-                final_state.application["feedback_hint"] = "wants_alternative"
-                updated = reason_and_rank(final_state)
+        with st.form("feedback_form"):
+            feedback_option = st.radio(
+                "Would you like to:",
+                ["Accept this plan", "Suggest an alternative", "I can't afford this"],
+                key="feedback_radio"
+            )
+            feedback_submit = st.form_submit_button("Submit Feedback")
+
+        if feedback_submit:
+            current_state = final_state
+
+            if feedback_option == "Accept this plan":
+                st.success("✅ You have accepted the plan.")
+                st.info(f"Reference #: {current_state.application['customer_id'].upper()}-{datetime.now().strftime('%d%m%y%H%M%S')}")
+                del st.session_state.final_state
+            else:
+                if "alternative" in feedback_option.lower():
+                    current_state.application["feedback_hint"] = "wants_alternative"
+                elif "afford" in feedback_option.lower():
+                    current_state.application["income"] = current_state.application["income"] / 2
+
+                updated = reason_and_rank(current_state)
                 updated = take_action(updated)
-                st.success(f"Updated Plan: {updated.selected_plan}")
+                st.session_state.final_state = updated
+                st.rerun()
+
     elif final_state.escalated:
-        st.warning("Your case has been escalated for manual review.")
+        st.warning("Your case was escalated for human review.")
+        del st.session_state.final_state
     else:
-        st.error("Unable to find suitable plan. Try again or contact support.")
+        st.error("Unable to find a suitable plan.")
+        del st.session_state.final_state
