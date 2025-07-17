@@ -222,8 +222,10 @@ if "final_state" not in st.session_state:
         }
 
         initial_state = ApplicationState(application=application)
-        final_state_dict = compiled_graph.invoke(initial_state)
-        st.session_state.final_state = ApplicationState(**final_state_dict)
+
+with st.spinner("⚙️ AFTP is processing your request..."):
+    final_state_dict = compiled_graph.invoke(initial_state)
+    st.session_state.final_state = ApplicationState(**final_state_dict)
 
 # === Plan Recommendation and Feedback ===
 if "final_state" in st.session_state:
@@ -269,9 +271,25 @@ if "final_state" in st.session_state:
                     st.session_state.final_state = updated
                     st.rerun()
 
+    
+    
     elif final_state.escalated:
-        st.warning("Your case was escalated for human review.")
-        del st.session_state.final_state
+    reviewer_name = "a senior case worker"
+    # Try to recover assigned reviewer name if available
+    try:
+        available = case_worker_df[(case_worker_df["experience_years"] >= 5) & (~case_worker_df["on_leave"])]
+        if not available.empty:
+            reviewer_name = available.sample(1).iloc[0]["name"]
+    except:
+        pass
+
+    st.subheader(f"📤 Escalated to human reviewer: **{reviewer_name}**")
+    st.warning("Your case was escalated for human review.")
+    st.markdown("---")
+    if st.button("🔁 Submit a new hardship application"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
     else:
         st.error("Unable to find a suitable plan.")
         del st.session_state.final_state
