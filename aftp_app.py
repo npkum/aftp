@@ -271,10 +271,9 @@ if "final_state" in st.session_state:
                     st.session_state.final_state = updated
                     st.rerun()
 
-    
-    
+  
     elif final_state.escalated:
-    reviewer_name = "a senior case worker"
+        reviewer_name = "a senior case worker"
     # Try to recover assigned reviewer name if available
     try:
         available = case_worker_df[(case_worker_df["experience_years"] >= 5) & (~case_worker_df["on_leave"])]
