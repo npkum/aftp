@@ -191,7 +191,15 @@ if "final_state" not in st.session_state:
     st.markdown("Submit your hardship information to receive a suitable plan recommendation.")
 
 # === Form Input Section ===
-if "final_state" not in st.session_state:
+# === Streamlit UI ===
+st.title("🤖 AFTP Hardship Planner")
+
+# Only show top-level instructions if not processing or done
+if "final_state" not in st.session_state and not st.session_state.get("processing"):
+    st.markdown("Submit your hardship information to receive a suitable plan recommendation.")
+
+# === Step 1: Show input form only if not already processing or done ===
+if "final_state" not in st.session_state and not st.session_state.get("processing"):
     with st.form("input_form"):
         name = st.text_input("Full Name")
         customer_id = st.text_input("Customer ID")
@@ -204,7 +212,8 @@ if "final_state" not in st.session_state:
         submitted = st.form_submit_button("Submit Application")
 
     if submitted:
-        application = {
+        st.session_state.processing = True
+        st.session_state.application_data = {
             "customer_id": customer_id,
             "name": name,
             "submitted_on": str(datetime.today().date()),
@@ -215,12 +224,16 @@ if "final_state" not in st.session_state:
             "history": {"on_time_payments": 12 - late_payments, "late_payments": late_payments},
             "flagged_abuse": flagged_abuse
         }
+        st.rerun()
 
-        initial_state = ApplicationState(application=application)
-
-        with st.spinner("⚙️ AFTP is processing your request..."):
-            final_state_dict = compiled_graph.invoke(initial_state)
-            st.session_state.final_state = ApplicationState(**final_state_dict)
+# === Step 2: If processing, run the graph ===
+if st.session_state.get("processing") and "final_state" not in st.session_state:
+    with st.spinner("⚙️ AFTP is processing your request..."):
+        initial_state = ApplicationState(application=st.session_state.application_data)
+        final_state_dict = compiled_graph.invoke(initial_state)
+        st.session_state.final_state = ApplicationState(**final_state_dict)
+        st.session_state.processing = False
+        st.rerun()
 
 # === Results + Feedback ===
 if "final_state" in st.session_state:
