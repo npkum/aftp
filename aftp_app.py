@@ -1,3 +1,5 @@
+# === aftp_app.py ===
+
 import streamlit as st
 from datetime import datetime
 import numpy as np
@@ -15,14 +17,9 @@ st.set_page_config(page_title="AFTP - Hardship Planner", layout="centered")
 # === Load LLM ===
 @st.cache_resource
 def load_llm_streaming():
-    model_id = "google/flan-t5-large"
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
-    except:
-        model_id = "google/flan-t5-base"
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+    model_id = "google/flan-t5-base"  # ✅ Using smaller model for faster response
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
     return pipeline("text2text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256)
 
 llm_pipe = load_llm_streaming()
@@ -73,14 +70,13 @@ def assign_to_human_caseworker(app):
     available = case_worker_df[(case_worker_df["experience_years"] >= 5) & (~case_worker_df["on_leave"])]
     if not available.empty:
         selected = available.sample(1).iloc[0]
-        st.info(f"Escalated to human reviewer: {selected['name']}")
+        st.session_state.reviewer_name = selected["name"]
     else:
-        st.warning("No senior case workers available. Case queued.")
+        st.session_state.reviewer_name = "a senior case worker"
 
 def check_proactive_escalation(app):
     return app["history"]["late_payments"] > 3 or app.get("flagged_abuse", False)
 
-# === Prepopulate Samples ===
 @st.cache_resource
 def prepopulate_samples():
     samples = [
@@ -95,7 +91,7 @@ def prepopulate_samples():
 
 prepopulate_samples()
 
-# === LangGraph State Definition ===
+# === LangGraph State ===
 @dataclass
 class ApplicationState:
     application: Dict[str, Any]
@@ -168,7 +164,6 @@ What is the next step?
 Options: validate, reason_and_rank, take_action, END
 """
     llm_output = llm_pipe(prompt)[0]["generated_text"].strip().lower()
-
     if "validate" in llm_output:
         return "validate"
     elif "reason" in llm_output:
@@ -192,9 +187,10 @@ compiled_graph = workflow.compile()
 
 # === Streamlit UI ===
 st.title("🤖 AFTP Hardship Planner")
-st.markdown("Submit your hardship information to receive a suitable plan recommendation.")
+if "final_state" not in st.session_state:
+    st.markdown("Submit your hardship information to receive a suitable plan recommendation.")
 
-# === Application Input Form ===
+# === Form Input Section ===
 if "final_state" not in st.session_state:
     with st.form("input_form"):
         name = st.text_input("Full Name")
@@ -205,7 +201,6 @@ if "final_state" not in st.session_state:
         account_type = st.selectbox("Account Type", ["mortgage", "credit card", "personal loan"])
         late_payments = st.slider("Late Payments in Last 12 Months", 0, 12, 0)
         flagged_abuse = st.checkbox("Previously defaulted or rejected?")
-
         submitted = st.form_submit_button("Submit Application")
 
     if submitted:
@@ -227,7 +222,7 @@ if "final_state" not in st.session_state:
             final_state_dict = compiled_graph.invoke(initial_state)
             st.session_state.final_state = ApplicationState(**final_state_dict)
 
-# === Plan Recommendation and Feedback ===
+# === Results + Feedback ===
 if "final_state" in st.session_state:
     final_state = st.session_state.final_state
 
@@ -239,53 +234,37 @@ if "final_state" in st.session_state:
         if st.session_state.get("plan_accepted", False):
             st.success("✅ You have accepted the plan.")
             st.info(f"Reference #: {final_state.application['customer_id'].upper()}-{datetime.now().strftime('%d%m%y%H%M%S')}")
-            st.markdown("---")
             if st.button("🔁 Submit a new hardship application"):
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
+                st.session_state.clear()
                 st.rerun()
         else:
             with st.form("feedback_form"):
-                feedback_option = st.radio(
-                    "Would you like to:",
-                    ["Accept this plan", "Suggest an alternative", "I can't afford this"],
-                    key="feedback_radio"
-                )
+                feedback_option = st.radio("Would you like to:", ["Accept this plan", "Suggest an alternative", "I can't afford this"])
                 feedback_submit = st.form_submit_button("Submit Feedback")
 
             if feedback_submit:
-                current_state = final_state
-
                 if feedback_option == "Accept this plan":
                     st.session_state.plan_accepted = True
                     st.rerun()
                 else:
                     if "alternative" in feedback_option.lower():
-                        current_state.application["feedback_hint"] = "wants_alternative"
+                        final_state.application["feedback_hint"] = "wants_alternative"
                     elif "afford" in feedback_option.lower():
-                        current_state.application["income"] = current_state.application["income"] / 2
-
-                    updated = reason_and_rank(current_state)
+                        final_state.application["income"] /= 2
+                    updated = reason_and_rank(final_state)
                     updated = take_action(updated)
                     st.session_state.final_state = updated
                     st.rerun()
 
     elif final_state.escalated:
-        reviewer_name = "a senior case worker"
-        try:
-            available = case_worker_df[(case_worker_df["experience_years"] >= 5) & (~case_worker_df["on_leave"])]
-            if not available.empty:
-                reviewer_name = available.sample(1).iloc[0]["name"]
-        except:
-            pass
-
-        st.subheader(f"📤 Escalated to human reviewer: **{reviewer_name}**")
+        reviewer = st.session_state.get("reviewer_name", "a senior case worker")
+        st.subheader(f"📤 Escalated to human reviewer: **{reviewer}**")
         st.warning("Your case was escalated for human review.")
-        st.markdown("---")
         if st.button("🔁 Submit a new hardship application"):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            st.session_state.clear()
             st.rerun()
     else:
         st.error("Unable to find a suitable plan.")
-        del st.session_state.final_state
+        if st.button("🔁 Submit a new hardship application"):
+            st.session_state.clear()
+            st.rerun()
