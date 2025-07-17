@@ -1,4 +1,3 @@
-# aftp_app.py
 import streamlit as st
 from datetime import datetime
 import numpy as np
@@ -28,12 +27,12 @@ def load_llm_streaming():
 
 llm_pipe = load_llm_streaming()
 
-# === Embedding + Vector Store ===
+# === Vector store and embedding setup ===
 encoder = SentenceTransformer("all-MiniLM-L6-v2")
 index = faiss.IndexFlatL2(384)
 vector_store: Dict[str, Dict[str, Any]] = {}
 
-# === Case Workers & Plans ===
+# === Case workers and plans ===
 case_worker_df = pd.DataFrame([
     {"name": "Priya Singh", "plan": "3-month deferral", "experience_years": 5, "on_leave": False},
     {"name": "Anil Mehta", "plan": "interest reduction", "experience_years": 7, "on_leave": False},
@@ -48,9 +47,9 @@ hardship_plans = {
     "payment extension": {"description": "Extend term by 12 months.", "risk_score": 4},
 }
 
-# === Functions ===
+# === Utility functions ===
 def check_eligibility(app):
-    if app["hardship_reason"] == "Job Loss" and app["income"] < app["expenses"]:
+    if app["income"] < app["expenses"]:
         return ["3-month deferral", "partial payment suspension"]
     return ["payment extension", "interest reduction"]
 
@@ -81,7 +80,22 @@ def assign_to_human_caseworker(app):
 def check_proactive_escalation(app):
     return app["history"]["late_payments"] > 3 or app.get("flagged_abuse", False)
 
-# === LangGraph State ===
+# === Sample data population ===
+@st.cache_resource
+def prepopulate_samples():
+    samples = [
+        {"customer_id": "C100", "text": "Job Loss income:1500 expenses:2200", "context": {"plan": "3-month deferral"}},
+        {"customer_id": "C101", "text": "Disaster income:1800 expenses:2100", "context": {"plan": "interest reduction"}},
+        {"customer_id": "C102", "text": "Medical Emergency income:2000 expenses:2500", "context": {"plan": "partial payment suspension"}},
+        {"customer_id": "C103", "text": "Job Loss income:1400 expenses:2000", "context": {"plan": "3-month deferral"}},
+        {"customer_id": "C104", "text": "Disaster income:2500 expenses:2600", "context": {"plan": "payment extension"}},
+    ]
+    for sample in samples:
+        store_context(sample["customer_id"], sample["text"], sample["context"])
+
+prepopulate_samples()
+
+# === LangGraph setup ===
 @dataclass
 class ApplicationState:
     application: Dict[str, Any]
@@ -95,15 +109,18 @@ def validate(state: ApplicationState) -> ApplicationState:
 def reason_and_rank(state: ApplicationState) -> ApplicationState:
     app = state.application
     eligible = check_eligibility(app)
-    query_vector = encoder.encode([build_embedding(app)])[0]
+    if not eligible:
+        assign_to_human_caseworker(app)
+        return ApplicationState(application=app, escalated=True, handled=True)
 
+    query_vector = encoder.encode([build_embedding(app)])[0]
     best_context = None
     if len(vector_store) > 0:
         D, I = index.search(np.array([query_vector]), k=1)
         if D[0][0] <= 10.0:
             best_match_id = list(vector_store.keys())[I[0][0]]
             best_context = vector_store[best_match_id]["context"]
-            st.info(f"Matched context from customer: {best_match_id} | Plan: {best_context['plan']}")
+            st.info(f"Matched similar case: {best_match_id} | Plan: {best_context['plan']}")
 
     ranked = sorted(eligible, key=lambda p: hardship_plans[p]["risk_score"])
 
@@ -120,41 +137,47 @@ def take_action(state: ApplicationState) -> ApplicationState:
 
     if check_proactive_escalation(app):
         assign_to_human_caseworker(app)
-        return ApplicationState(application=app, escalated=True, handled=True)
+        return ApplicationState(application=app, selected_plan=plan, escalated=True, handled=True)
 
     if plan:
-        st.success(f"Plan '{plan}' assigned.")
+        st.success(f"Plan assigned: {plan}")
         assign_case_worker(plan)
         store_context(app["customer_id"], build_embedding(app), {"plan": plan, "status": "active"})
+        return ApplicationState(application=app, selected_plan=plan, handled=True)
 
-    return ApplicationState(application=app, selected_plan=plan, handled=True)
+    return ApplicationState(application=app, escalated=True, handled=True)
 
 def decide_next_node(state: ApplicationState) -> str:
     if state.handled:
         return END
 
+    app = state.application
     prompt = f"""
 Customer Info:
-- Reason: {state.application['hardship_reason']}
-- Income: {state.application['income']}
-- Expenses: {state.application['expenses']}
-- Late Payments: {state.application['history']['late_payments']}
-- Flagged Abuse: {state.application.get('flagged_abuse', False)}
+- Reason: {app['hardship_reason']}
+- Income: {app['income']}
+- Expenses: {app['expenses']}
+- Late Payments: {app['history']['late_payments']}
+- Flagged Abuse: {app.get('flagged_abuse', False)}
+- Selected Plan: {state.selected_plan}
+- Escalated: {state.escalated}
+- Handled: {state.handled}
 
 What is the next step?
 Options: validate, reason_and_rank, take_action, END
 """
     llm_output = llm_pipe(prompt)[0]["generated_text"].strip().lower()
+
     if "validate" in llm_output:
         return "validate"
     elif "reason" in llm_output:
         return "reason_and_rank"
-    elif "action" in llm_output:
+    elif "action" in llm_output and state.selected_plan:
         return "take_action"
-    else:
-        return "reason_and_rank"
+    elif "end" in llm_output:
+        return END
+    return "reason_and_rank"
 
-# === LangGraph ===
 workflow = StateGraph(state_schema=ApplicationState)
 workflow.add_node("validate", validate)
 workflow.add_node("reason_and_rank", reason_and_rank)
@@ -165,11 +188,11 @@ workflow.add_conditional_edges("reason_and_rank", decide_next_node)
 workflow.add_conditional_edges("take_action", decide_next_node)
 compiled_graph = workflow.compile()
 
-# === UI Form ===
-st.title("🧾 AFTP Hardship Planner")
-st.markdown("Submit your hardship details below.")
+# === UI ===
+st.title("🤖 AFTP Hardship Planner")
+st.markdown("Submit your hardship information and get a suitable plan recommendation.")
 
-with st.form("user_form"):
+with st.form("hardship_form"):
     name = st.text_input("Full Name")
     customer_id = st.text_input("Customer ID")
     hardship_reason = st.selectbox("Hardship Reason", ["Job Loss", "Medical Emergency", "Disaster"])
@@ -179,7 +202,7 @@ with st.form("user_form"):
     late_payments = st.slider("Late Payments in Last 12 Months", 0, 12, 0)
     flagged_abuse = st.checkbox("Previously defaulted or rejected?")
 
-    submitted = st.form_submit_button("Submit")
+    submitted = st.form_submit_button("Submit Application")
 
 if submitted:
     application = {
@@ -193,18 +216,20 @@ if submitted:
         "history": {"on_time_payments": 12 - late_payments, "late_payments": late_payments},
         "flagged_abuse": flagged_abuse
     }
-    state = ApplicationState(application=application)
 
-    final_state_dict = compiled_graph.invoke(state)
+    initial_state = ApplicationState(application=application)
+    final_state_dict = compiled_graph.invoke(initial_state)
     final_state = ApplicationState(**final_state_dict)
 
+    st.write("📊 Debug Output:", final_state)
+
     if final_state.selected_plan and not final_state.escalated:
-        st.subheader("💡 Proposed Plan")
-        st.markdown(f"**Plan:** {final_state.selected_plan}")
-        st.markdown(f"**Description:** {hardship_plans[final_state.selected_plan]['description']}")
+        st.subheader("✅ Recommended Plan")
+        st.write(f"**Plan:** {final_state.selected_plan}")
+        st.write(f"**Description:** {hardship_plans[final_state.selected_plan]['description']}")
+        
+        feedback = st.text_input("Optional Feedback (e.g., 'suggest alternative')")
 
-
-        feedback = st.text_input("Feedback? (Optional - type something like 'suggest alternative')")
         if feedback:
             if "alternative" in feedback:
                 final_state.application["feedback_hint"] = "wants_alternative"
@@ -212,6 +237,6 @@ if submitted:
                 updated = take_action(updated)
                 st.success(f"Updated Plan: {updated.selected_plan}")
     elif final_state.escalated:
-        st.warning("Your case was escalated for human review.")
+        st.warning("Your case has been escalated for manual review.")
     else:
         st.error("Unable to find suitable plan. Try again or contact support.")
